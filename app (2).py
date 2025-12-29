@@ -1,10 +1,16 @@
 
-import streamlit as st 
-from datetime import datetime, timedelta, date 
-import io 
-import re 
-import calendar 
+
+import streamlit as st
+import pandas as pd
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, date
+import io
+import re
+import calendar
 from typing import Optional, Set, Tuple
+
+st.set_page_config(page_title="E2B_R3 XML Triage Application", layout="wide")
+
 st.set_page_config(page_title="E2B_R3 XML Triage Application", layout="wide")
 st.markdown(""" """, unsafe_allow_html=True)
 st.title("📊🧠 E2B_R3 XML Triage Application 🛠️ 🚀")
