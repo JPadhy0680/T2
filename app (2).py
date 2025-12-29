@@ -558,9 +558,9 @@ with tab1:
                     # Build product details ONLY for Celix matched products
                     if matched_company_prod:
                         parts = []
-        # Add MAH to case_mah_names only for displayed Celix suspect
-        if mah_name_clean:
-            case_mah_names.add(mah_name_clean)
+                    # Add MAH to case_mah_names only for displayed Celix suspect
+                    if mah_name_clean:
+                        case_mah_names.add(mah_name_clean)
                         display_name = raw_drug_text if raw_drug_text else matched_company_prod.title()
                         display_name = clean_value(display_name)
                         if display_name: parts.append(f"Drug: {display_name}")
