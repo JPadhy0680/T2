@@ -791,7 +791,7 @@ with tab1:
             if frd_disp: report_date_parts.append(f"FRD: {frd_disp}")
             if lrd_disp: report_date_parts.append(f"LRD: {lrd_disp}")
             if td_disp:  report_date_parts.append(f"TD: {td_disp}")
-            report_date_display = "; ".join(report_date_parts)
+            report_date_display = "; \n ".join(report_date_parts)
 
             all_rows_display.append({
                 'SL No': idx,
