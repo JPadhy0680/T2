@@ -10,16 +10,15 @@ from typing import Optional, Set, Tuple
 
 st.set_page_config(page_title="E2B_R3 XML Triage Application", layout="wide")
 st.markdown(""" """, unsafe_allow_html=True)
-# Use literal emojis to avoid surrogate errors
 st.title("📊🧠 E2B_R3 XML Triage Application 🛠️ 🚀")
 
 # Version header
-# v1.5.7-report-date-frd-lrd-td-iter:
-# - Robust FRD/LRD detection by iterating the full reaction subtree (pre-order).
-# - LRD = first availabilityTime/@value within reaction.
-# - FRD = last effectiveTime/low/@value seen before that availabilityTime.
-# - Product & event date logic remains unchanged.
-# - 'Transmission Date' column renamed to 'Report Date' (FRD, LRD, TD shown).
+# v1.5.8-global-frd-lrd-td:
+# - Report Date column uses GLOBAL scope:
+#   LRD = first <availabilityTime value> in the entire XML (document order).
+#   FRD = immediately prior <low value> seen before that availabilityTime (global).
+#   TD  = first <creationTime value> if present.
+# - All other app logic unchanged.
 
 # --------------------- Helpers & Maps ---------------------
 
@@ -317,17 +316,55 @@ def contains_competitor_name(lot_text: str, competitor_names: Set[str]) -> bool:
             return True
     return False
 
-def get_mah_name_for_drug(drug_elem, ns) -> str:
-    local_paths = [
-        './/hl7:playingOrganization/hl7:name',
-        './/hl7:manufacturerOrganization/hl7:name',
-        './/hl7:asManufacturedProduct/hl7:manufacturerOrganization/hl7:name',
-    ]
-    for p in local_paths:
-        node = drug_elem.find(p, ns)
-        if node is not None and node.text and node.text.strip():
-            return node.text.strip()
-    return ""
+# --------------------- NEW: Global FRD/LRD/TD ---------------------
+def local_name(tag: str) -> str:
+    return tag.split('}')[-1] if '}' in tag else tag
+
+def extract_global_frd_lrd_td(root):
+    """
+    Global rule (document order, entire XML):
+      - TD: first <creationTime value> (if present).
+      - Walk all elements:
+          keep last <low value> seen;
+          first <availabilityTime value> => LRD; FRD = that prior low.
+      - Returns formatted (FRD, LRD, TD) and raw values.
+    """
+    # TD (first creationTime)
+    td_raw = None
+    for el in root.iter():
+        if local_name(el.tag) == "creationTime":
+            val = el.attrib.get("value")
+            if val:
+                td_raw = val
+                break
+
+    last_low_value = None
+    lrd_raw = None
+
+    for el in root.iter():
+        ln = local_name(el.tag)
+        if ln == "low":
+            v = el.attrib.get("value")
+            if v:
+                last_low_value = v
+        elif ln == "availabilityTime":
+            v = el.attrib.get("value")
+            if v:
+                lrd_raw = v
+                break  # first availabilityTime defines LRD
+
+    frd_fmt = format_date(last_low_value) if last_low_value else ""
+    lrd_fmt = format_date(lrd_raw) if lrd_raw else ""
+    td_fmt  = format_date(td_raw) if td_raw else ""
+
+    return {
+        "FRD_raw": last_low_value or "",
+        "LRD_raw": lrd_raw or "",
+        "TD_raw":  td_raw or "",
+        "FRD": frd_fmt,
+        "LRD": lrd_fmt,
+        "TD": td_fmt,
+    }
 
 # --------------------- UI: Upload & Parse ---------------------
 
@@ -403,26 +440,20 @@ with tab1:
 
             ns = {'hl7': 'urn:hl7-org:v3', 'xsi': 'http://www.w3.org/2001/XMLSchema-instance'}
 
+            # Sender
             sender_elem = root.find('.//hl7:id[@root="2.16.840.1.113883.3.989.2.1.3.1"]', ns)
             sender_id = clean_value(sender_elem.attrib.get('extension', '') if sender_elem is not None else '')
 
+            # Transmission Date (TD)
             creation_elem = root.find('.//hl7:creationTime', ns)
             creation_raw = creation_elem.attrib.get('value', '') if creation_elem is not None else ''
-            transmission_date = clean_value(format_date(creation_raw))  # TD
-            transmission_date_obj = parse_date_obj(creation_raw)
+            td_fallback = clean_value(format_date(creation_raw))  # fallback TD if global doesn't find
 
-            case_age_days = ""
-            try:
-                if transmission_date_obj:
-                    case_age_days = (datetime.now().date() - transmission_date_obj).days
-                if isinstance(case_age_days, int) and case_age_days < 0:
-                    case_age_days = 0
-            except Exception:
-                case_age_days = ""
-
+            # Reporter Qualification
             reporter_elem = root.find('.//hl7:asQualifiedEntity/hl7:code', ns)
             reporter_qualification = clean_value(map_reporter(reporter_elem.attrib.get('code', '') if reporter_elem is not None else ''))
 
+            # Patient block
             gender_elem = root.find('.//hl7:administrativeGenderCode', ns)
             gender_mapped = map_gender(gender_elem.attrib.get('code', '') if gender_elem is not None else '')
             gender = clean_value(gender_mapped)
@@ -507,12 +538,10 @@ with tab1:
 
             product_details_list = []
             case_has_category2 = False
-            case_drug_dates_all = []
             case_drug_dates_display = []
-            case_event_dates = []
+            case_event_dates = []  # unchanged, used for validity checks
             case_displayed_mahs = []
             case_products_norm: Set[str] = set()
-            case_llts_norm = set()
 
             for drug in root.findall('.//hl7:substanceAdministration', ns):
                 id_elem = drug.find('.//hl7:id', ns)
@@ -555,11 +584,8 @@ with tab1:
                     stop_date_str = stop_elem.attrib.get('value', '') if stop_elem is not None else ''
                     start_date_disp = clean_value(format_date(start_date_str))
                     stop_date_disp = clean_value(format_date(stop_date_str))
-                    start_date_obj = parse_date_obj(start_date_str)
-                    stop_date_obj = parse_date_obj(stop_date_str)
 
-                    case_drug_dates_all.append((matched_company_prod, strength_mg, start_date_obj, stop_date_obj))
-
+                    # MAH (local to product element)
                     mah_name_raw = get_mah_name_for_drug(drug, ns)
                     mah_name_clean = clean_value(mah_name_raw)
 
@@ -632,7 +658,7 @@ with tab1:
                         if parts:
                             product_details_list.append(" \n ".join(parts))
 
-                        case_drug_dates_display.append((matched_company_prod, strength_mg, start_date_obj, stop_date_obj))
+                        case_drug_dates_display.append((matched_company_prod, strength_mg, parse_date_obj(start_date_str), parse_date_obj(stop_date_str)))
 
             seriousness_criteria = list(seriousness_map.keys())
             event_details_list = []
@@ -640,27 +666,7 @@ with tab1:
             case_has_serious_event = False
             event_listedness_items = []
 
-            # Case-level FRD/LRD placeholders (first detected across reactions)
-            case_frd_disp, case_lrd_disp = "", ""
-            case_frd_obj, case_lrd_obj = None, None
-
-            # Listedness assessment
-            def assess_event_listedness(llt_norm: str, suspect_products_norm: Set[str], listed_pairs_set: Set[Tuple[str, str]], ref_drugs_set: Set[str]) -> str:
-                if not listed_pairs_set or not ref_drugs_set:
-                    return "Reference not uploaded"
-                suspect_in_ref = {p for p in suspect_products_norm if p in ref_drugs_set}
-                if not suspect_in_ref:
-                    return "Reference not updated"
-                for p in suspect_in_ref:
-                    if (p, llt_norm) in listed_pairs_set:
-                        return "Listed"
-                return "Unlisted"
-
-            # --------------------- Events (reactions) ---------------------
-            # Helper to get local-name of a tag
-            def local_name(tag: str) -> str:
-                return tag.split('}')[-1] if '}' in tag else tag
-
+            # Events summary (unchanged except no FRD/LRD from events now)
             for reaction in root.findall('.//hl7:observation', ns):
                 code_elem = reaction.find('hl7:code', ns)
                 if code_elem is not None and code_elem.attrib.get('displayName') == 'reaction':
@@ -682,12 +688,22 @@ with tab1:
                     elif llt_code:
                         warnings.append(f"LLT mapping file not provided — listedness cannot be assessed for LLT code {llt_code}.")
 
+                    # Listedness (event-level)
+                    def assess_event_listedness(llt_norm: str, suspect_products_norm: Set[str], listed_pairs_set: Set[Tuple[str, str]], ref_drugs_set: Set[str]) -> str:
+                        if not listed_pairs_set or not ref_drugs_set:
+                            return "Reference not uploaded"
+                        suspect_in_ref = {p for p in suspect_products_norm if p in ref_drugs_set}
+                        if not suspect_in_ref:
+                            return "Reference not updated"
+                        for p in suspect_in_ref:
+                            if (p, llt_norm) in listed_pairs_set:
+                                return "Listed"
+                        return "Unlisted"
+
+                    ev_status = "LLT mapping missing"
                     if llt_term:
                         llt_norm = normalize_text(llt_term)
-                        case_llts_norm.add(llt_norm)
                         ev_status = assess_event_listedness(llt_norm, case_products_norm, listed_pairs, ref_drugs)
-                    else:
-                        ev_status = "LLT mapping missing"
                     event_listedness_items.append(f"Event {event_count}: {ev_status}")
 
                     # Seriousness
@@ -700,6 +716,7 @@ with tab1:
                     if seriousness_flags:
                         case_has_serious_event = True
 
+                    # Outcome
                     outcome_elem = reaction.find('.//hl7:code[@displayName="outcome"]/../hl7:value', ns)
                     outcome = map_outcome(outcome_elem.attrib.get('code', '') if outcome_elem is not None else '')
                     outcome = clean_value(outcome)
@@ -715,35 +732,6 @@ with tab1:
                     evt_high_obj = parse_date_obj(evt_high_str)
                     case_event_dates.append(("event", evt_low_obj, evt_high_obj))
 
-                    # -------- FRD/LRD detection: iterate entire reaction subtree --------
-                    last_effective_low_val = None
-                    lrd_val = None
-
-                    for el in reaction.iter():
-                        ln = local_name(el.tag)
-                        if ln == 'effectiveTime':
-                            low = el.find('hl7:low', ns)
-                            if low is not None and ('value' in low.attrib):
-                                # keep the latest low value seen so far
-                                last_effective_low_val = low.attrib.get('value', '') or last_effective_low_val
-                        elif ln == 'availabilityTime':
-                            val = el.attrib.get('value')
-                            if val:
-                                lrd_val = val
-                                break  # first availabilityTime defines LRD
-
-                    FRD_disp = clean_value(format_date(last_effective_low_val)) if last_effective_low_val else ''
-                    LRD_disp = clean_value(format_date(lrd_val)) if lrd_val else ''
-                    FRD_obj = parse_date_obj(last_effective_low_val) if last_effective_low_val else None
-                    LRD_obj = parse_date_obj(lrd_val) if lrd_val else None
-
-                    # Save case-level FRD/LRD (first seen)
-                    if not case_frd_disp and FRD_disp:
-                        case_frd_disp, case_frd_obj = FRD_disp, FRD_obj
-                    if not case_lrd_disp and LRD_disp:
-                        case_lrd_disp, case_lrd_obj = LRD_disp, LRD_obj
-
-                    # Build event details
                     details_parts = [f"Event {event_count}: {llt_term} ({pt_term})", f"Seriousness: {seriousness_display}"]
                     if outcome:
                         details_parts.append(f"Outcome: {outcome}")
@@ -751,23 +739,15 @@ with tab1:
                         details_parts.append(f"Event Start: {evt_low_disp}")
                     if evt_high_disp:
                         details_parts.append(f"Event End: {evt_high_disp}")
-                    if FRD_disp:
-                        details_parts.append(f"First Received: {FRD_disp}")
-                    if LRD_disp:
-                        details_parts.append(f"Latest Received: {LRD_disp}")
-
                     event_details_list.append("; ".join(details_parts))
                     event_count += 1
 
             event_details_combined_display = "\n".join(event_details_list)
 
-            # Reportability
-            if case_has_serious_event and case_has_category2:
-                reportability = "Category 2, serious, reportable case"
-            else:
-                reportability = "Non-Reportable"
+            # Reportability (unchanged)
+            reportability = "Category 2, serious, reportable case" if (case_has_serious_event and case_products_norm.intersection(category2_products)) else "Non-Reportable"
 
-            # Validity assessment (unchanged; limited to displayed drugs)
+            # -------- Validity assessment (unchanged; limited to displayed drugs) --------
             validity_reason: Optional[str] = None
             has_any_suspect = bool(suspect_ids)
             has_celix_suspect = bool(case_products_norm)
@@ -809,28 +789,27 @@ with tab1:
             narrative_full_raw = narrative_elem.text if narrative_elem is not None else ''
             narrative_full = clean_value(narrative_full_raw)
 
-            # Defer manual validity if comments exist but no auto reason
             if comments and validity_reason is None:
                 validity_value = "Kindly check comment and assess validity manually"
 
-            # Omit listedness for Non-Valid cases
             if isinstance(validity_value, str) and validity_value.startswith("Non-Valid"):
                 reportability = "NA"
                 event_listedness_items = []
             listedness_event_level_display = "; ".join(event_listedness_items)
 
-            # Warning for listedness reference issues
             if ("Reference not uploaded" in listedness_event_level_display) or ("Reference not updated" in listedness_event_level_display):
                 warnings.append("Listedness reference is missing or incomplete—please upload an updated (Drug Name, LLT) list.")
 
-            # ---------- Compose Report Date column (FRD, LRD, TD) ----------
+            # ---------- GLOBAL FRD/LRD/TD for Report Date ----------
+            global_dates = extract_global_frd_lrd_td(root)
+            frd_disp = global_dates["FRD"]
+            lrd_disp = global_dates["LRD"]
+            td_disp  = global_dates["TD"] or td_fallback
+
             report_date_parts = []
-            if case_frd_disp:
-                report_date_parts.append(f"FRD: {case_frd_disp}")
-            if case_lrd_disp:
-                report_date_parts.append(f"LRD: {case_lrd_disp}")
-            if transmission_date:
-                report_date_parts.append(f"TD: {transmission_date}")
+            if frd_disp: report_date_parts.append(f"FRD: {frd_disp}")
+            if lrd_disp: report_date_parts.append(f"LRD: {lrd_disp}")
+            if td_disp:  report_date_parts.append(f"TD: {td_disp}")
             report_date_display = "; ".join(report_date_parts)
 
             all_rows_display.append({
@@ -838,7 +817,7 @@ with tab1:
                 'Date': current_date,
                 'Sender ID': sender_id,
                 'Report Date': report_date_display,
-                'Case Age (days)': case_age_days,
+                'Case Age (days)': (datetime.now().date() - parse_date_obj(global_dates["TD_raw"])).days if global_dates["TD_raw"] else "",
                 'Reporter Qualification': reporter_qualification,
                 'Patient Detail': patient_detail,
                 'Product Detail': " \n ".join(product_details_list),
