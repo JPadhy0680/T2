@@ -14,10 +14,9 @@ st.markdown(""" """, unsafe_allow_html=True)
 st.title("📊🧠 E2B_R3 XML Triage Application 🛠️ 🚀") 
 
 # Version header 
-# v1.5.6-report-date-frd-lrd-td-fix: 
-# - Robust FRD/LRD detection using pre-order DFS within each reaction: 
-#   availabilityTime/@value -> LRD; FRD = last effectiveTime/low value seen before this availabilityTime. 
-# - Keeps existing product and event date logic unchanged. 
+# v1.5.7-report-date-frd-lrd-td-fix-nonlocal: 
+# - Replaces 'nonlocal' with mutable dict state in DFS to support module-level context. 
+# - Robust FRD/LRD detection remains via pre-order traversal. 
 
 def _get_password(): 
     DEFAULT_PASSWORD = "7064242966" 
@@ -701,35 +700,33 @@ with tab1:
                     evt_high_obj = parse_date_obj(evt_high_str) 
                     case_event_dates.append(("event", evt_low_obj, evt_high_obj)) 
 
-                    # ---- Robust FRD/LRD detection via DFS order ---- 
+                    # ---- Robust FRD/LRD detection without nonlocal ---- 
                     FRD_disp = LRD_disp = '' 
                     FRD_obj = LRD_obj = None 
 
-                    last_effective_low_val = None 
-                    lrd_val = None 
+                    state = {"last_effective_low_val": None, "lrd_val": None} 
 
                     def walk(elem): 
-                        nonlocal last_effective_low_val, lrd_val 
-                        # if this is an effectiveTime, capture its low value 
+                        # Capture low under any effectiveTime encountered so far 
                         if elem.tag.endswith('effectiveTime'): 
                             low = elem.find('hl7:low', ns) 
                             if low is not None and ('value' in low.attrib): 
-                                last_effective_low_val = low.attrib.get('value', '') or None 
-                        # if availabilityTime encountered first time, capture 
-                        if elem.tag.endswith('availabilityTime') and ('value' in elem.attrib) and lrd_val is None: 
-                            lrd_val = elem.attrib.get('value', '') or None 
-                            return  # stop descending further from availabilityTime node 
+                                state["last_effective_low_val"] = low.attrib.get('value', '') or state["last_effective_low_val"] 
+                        # First availabilityTime value => LRD 
+                        if elem.tag.endswith('availabilityTime') and ('value' in elem.attrib) and state["lrd_val"] is None: 
+                            state["lrd_val"] = elem.attrib.get('value', '') or None 
+                            return  # stop descending further from availabilityTime 
                         for child in list(elem): 
                             walk(child) 
 
                     walk(reaction) 
 
-                    if lrd_val: 
-                        LRD_disp = clean_value(format_date(lrd_val)) 
-                        LRD_obj = parse_date_obj(lrd_val) 
-                    if last_effective_low_val: 
-                        FRD_disp = clean_value(format_date(last_effective_low_val)) 
-                        FRD_obj = parse_date_obj(last_effective_low_val) 
+                    if state["lrd_val"]: 
+                        LRD_disp = clean_value(format_date(state["lrd_val"])) 
+                        LRD_obj = parse_date_obj(state["lrd_val"]) 
+                    if state["last_effective_low_val"]: 
+                        FRD_disp = clean_value(format_date(state["last_effective_low_val"])) 
+                        FRD_obj = parse_date_obj(state["last_effective_low_val"]) 
 
                     # Save first FRD/LRD at case level 
                     if not case_frd_disp and FRD_disp: 
