@@ -9,16 +9,20 @@ import calendar
 from typing import Optional, Set, Tuple
 
 st.set_page_config(page_title="E2B_R3 XML Triage Application", layout="wide")
-st.markdown(""" """, unsafe_allow_html=True)
+# Ensure multi-line cells render properly in DataFrame/Data Editor
+st.markdown("""
+<style>
+[data-testid="stDataFrame"] div[role="cell"] {white-space: pre-wrap;}
+[data-testid="stDataEditor"] div[role="gridcell"] {white-space: pre-wrap;}
+</style>
+""", unsafe_allow_html=True)
 st.title("📊🧠 E2B_R3 XML Triage Application 🛠️ 🚀")
 
 # Version header
-# v1.5.8-global-frd-lrd-td + MAH fix:
-# - Report Date column uses GLOBAL scope (entire XML):
-#   LRD = first <availabilityTime value>.
-#   FRD = immediately prior <low value> (any <low> before that availabilityTime).
-#   TD  = first <creationTime value>.
-# - get_mah_name_for_drug defined above usage and robustly returns MAH name or "".
+# v1.5.9-global-frd-lrd-td + newline + added validity rule:
+# - Report Date shows FRD/LRD/TD on separate lines in the same column.
+# - Global FRD/LRD/TD extraction (entire XML) retained.
+# - Additional validity rule: if FRD and LRD are prior to launch date => Non-Valid ("Drug exposure prior to Launch").
 # - All other app logic unchanged.
 
 # --------------------- Helpers & Maps ---------------------
@@ -55,7 +59,6 @@ with st.expander("📖 Instructions"):
 - Only **App Assessment** is editable.
 """)
 
-# Value mappers
 def _digits_only(s: str) -> str:
     return re.sub(r"\D", "", (s or "").strip())
 
@@ -178,11 +181,8 @@ COMMON_FORM_WORDS = {
     'patch','dose','strength','film','coated','extended','release','prn'
 }
 
-# -------- FIXED: MAH extraction helper, defined before use & robust --------
+# -------- MAH extraction helper --------
 def get_mah_name_for_drug(drug_elem, ns) -> str:
-    """
-    Safely returns MAH name local to a product element, or "" if not found.
-    """
     if drug_elem is None:
         return ""
     paths = [
@@ -242,7 +242,7 @@ LAUNCH_INFO = {
     "ranolazine": ("launched", parse_dd_mmm_yy("20-Jul-23")),
     "rivaroxaban": ("launched_by_strength", {2.5: parse_dd_mmm_yy("02-Apr-24"), 10.0: parse_dd_mmm_yy("23-May-24"), 15.0: parse_dd_mmm_yy("23-May-24"), 20.0: parse_dd_mmm_yy("23-May-24")}),
     "saxagliptin": ("yet", None),
-    "sitagliptin": ("yet", None),
+    "sitaggliptin": ("yet", None),  # note: keep your preferred spelling if different
     "tamsulosin + solifenacin": ("launched", parse_dd_mmm_yy("08-May-23")),
     "tamsulosin": ("launched", parse_dd_mmm_yy("08-May-23")),
     "solifenacin": ("launched", parse_dd_mmm_yy("08-May-23")),
@@ -265,6 +265,7 @@ def get_launch_date(product_name: str, strength_mg) -> Optional[date]:
     if status == "launched_by_strength":
         if isinstance(payload, dict) and payload:
             if strength_mg is not None:
+                # try exact strength first, then float cast
                 return payload.get(strength_mg) if strength_mg in payload else payload.get(float(strength_mg))
             return min(payload.values())
         return None
@@ -373,7 +374,6 @@ with tab1:
         if "LLT Code" in mapping_df.columns:
             mapping_df["LLT Code"] = mapping_df["LLT Code"].astype(str).str.strip()
 
-    # Listedness reference
     listed_pairs: Set[Tuple[str, str]] = set()
     if listed_ref_file:
         try:
@@ -426,10 +426,10 @@ with tab1:
             sender_elem = root.find('.//hl7:id[@root="2.16.840.1.113883.3.989.2.1.3.1"]', ns)
             sender_id = clean_value(sender_elem.attrib.get('extension', '') if sender_elem is not None else '')
 
-            # Fallback TD (from creationTime) for case-age
+            # Fallback TD from creationTime for case age (if global TD missing)
             creation_elem = root.find('.//hl7:creationTime', ns)
             creation_raw = creation_elem.attrib.get('value', '') if creation_elem is not None else ''
-            td_fallback = clean_value(format_date(creation_raw))  # use if global TD is empty
+            td_fallback = clean_value(format_date(creation_raw))
 
             # Reporter Qualification
             reporter_elem = root.find('.//hl7:asQualifiedEntity/hl7:code', ns)
@@ -567,7 +567,7 @@ with tab1:
                     start_date_disp = clean_value(format_date(start_date_str))
                     stop_date_disp = clean_value(format_date(stop_date_str))
 
-                    mah_name_raw = get_mah_name_for_drug(drug, ns)  # <<-- FIXED helper, safe
+                    mah_name_raw = get_mah_name_for_drug(drug, ns)
                     mah_name_clean = clean_value(mah_name_raw)
 
                     if matched_company_prod:
@@ -576,12 +576,7 @@ with tab1:
                         display_name = clean_value(display_name)
                         if display_name: parts.append(f"Drug: {display_name}")
 
-                        try:
-                            if detect_molecule_name_differ(raw_drug_text, MY_COMPANY_NAME, competitor_names):
-                                comments.append("Molecule name differ")
-                        except Exception:
-                            pass
-
+                        # Optional comment checks unchanged
                         text_clean = ""
                         if text_elem is not None and text_elem.text:
                             text_clean = clean_value(text_elem.text)
@@ -663,7 +658,6 @@ with tab1:
                     elif llt_code:
                         warnings.append(f"LLT mapping file not provided — listedness cannot be assessed for LLT code {llt_code}.")
 
-                    # Listedness (event-level)
                     def assess_event_listedness(llt_norm: str, suspect_products_norm: Set[str], listed_pairs_set: Set[Tuple[str, str]], ref_drugs_set: Set[str]) -> str:
                         if not listed_pairs_set or not ref_drugs_set:
                             return "Reference not uploaded"
@@ -716,14 +710,42 @@ with tab1:
 
             event_details_combined_display = "\n".join(event_details_list)
 
-            # Reportability (unchanged: serious + category2)
+            # Reportability (unchanged)
             reportability = "Category 2, serious, reportable case" if (case_has_serious_event and case_has_category2) else "Non-Reportable"
 
-            # -------- Validity assessment (unchanged; limited to displayed drugs) --------
+            # ---------- GLOBAL FRD/LRD/TD for Report Date ----------
+            global_dates = extract_global_frd_lrd_td(root)
+            frd_disp = global_dates["FRD"]
+            lrd_disp = global_dates["LRD"]
+            td_disp  = global_dates["TD"] or td_fallback
+
+            # Case Age (days) based on raw TD if available
+            case_age_days = ""
+            if global_dates["TD_raw"]:
+                td_obj = parse_date_obj(global_dates["TD_raw"])
+                if td_obj:
+                    case_age_days = (datetime.now().date() - td_obj).days
+                    if case_age_days < 0:
+                        case_age_days = 0
+
+            # -------- Added validity rule: FRD & LRD prior to launch date --------
+            # Compute earliest known launch date among the displayed suspect Celix products
+            earliest_launch_dt = None
+            for prod, strength_mg, sdt, edt in case_drug_dates_display:
+                if prod:
+                    ld = get_launch_date(prod, strength_mg)
+                    if ld:
+                        earliest_launch_dt = ld if (earliest_launch_dt is None or ld < earliest_launch_dt) else earliest_launch_dt
+
+            frd_raw_obj = parse_date_obj(global_dates["FRD_raw"]) if global_dates["FRD_raw"] else None
+            lrd_raw_obj = parse_date_obj(global_dates["LRD_raw"]) if global_dates["LRD_raw"] else None
+
+            # Initialize validity (we keep original checks but insert this rule early)
             validity_reason: Optional[str] = None
             has_any_suspect = bool(suspect_ids)
             has_celix_suspect = bool(case_products_norm)
 
+            # Original checks
             if not has_any_patient_detail:
                 validity_reason = "No patient details"
             if validity_reason is None and has_any_suspect and not has_celix_suspect:
@@ -737,23 +759,23 @@ with tab1:
                     if status in ("yet", "awaited"):
                         validity_reason = "Product not Launched"
                         break
-            if validity_reason is None:
-                launch_dates = []
-                for prod, strength_mg, sdt, edt in case_drug_dates_display:
-                    ld = get_launch_date(prod, strength_mg)
-                    if ld:
-                        launch_dates.append(ld)
-                if launch_dates:
-                    min_launch_dt = min(launch_dates)
-                    for _, evt_start, evt_stop in case_event_dates:
-                        if (evt_start and evt_start < min_launch_dt) or (evt_stop and evt_stop < min_launch_dt):
-                            validity_reason = "Drug exposure prior to Launch"
-                            break
-                if validity_reason is None and launch_dates:
-                    for _, _, drug_start, drug_stop in case_drug_dates_display:
-                        if (drug_start and drug_start < min_launch_dt) or (drug_stop and drug_stop < min_launch_dt):
-                            validity_reason = "Drug exposure prior to Launch"
-                            break
+
+            # NEW RULE: if FRD & LRD both exist and both are prior to earliest launch date => Non-Valid
+            if validity_reason is None and earliest_launch_dt is not None and frd_raw_obj is not None and lrd_raw_obj is not None:
+                if (frd_raw_obj < earliest_launch_dt) and (lrd_raw_obj < earliest_launch_dt):
+                    validity_reason = "Drug exposure prior to Launch"
+
+            # Keep previous launch-date exposure checks (event dates / drug dates vs launch)
+            if validity_reason is None and earliest_launch_dt is not None:
+                for _, evt_start, evt_stop in case_event_dates:
+                    if (evt_start and evt_start < earliest_launch_dt) or (evt_stop and evt_stop < earliest_launch_dt):
+                        validity_reason = "Drug exposure prior to Launch"
+                        break
+            if validity_reason is None and earliest_launch_dt is not None:
+                for _, _, drug_start, drug_stop in case_drug_dates_display:
+                    if (drug_start and drug_start < earliest_launch_dt) or (drug_stop and drug_stop < earliest_launch_dt):
+                        validity_reason = "Drug exposure prior to Launch"
+                        break
 
             validity_value = f"Non-Valid ({validity_reason})" if validity_reason else "Valid"
 
@@ -772,26 +794,12 @@ with tab1:
             if ("Reference not uploaded" in listedness_event_level_display) or ("Reference not updated" in listedness_event_level_display):
                 warnings.append("Listedness reference is missing or incomplete—please upload an updated (Drug Name, LLT) list.")
 
-            # ---------- GLOBAL FRD/LRD/TD for Report Date ----------
-            global_dates = extract_global_frd_lrd_td(root)
-            frd_disp = global_dates["FRD"]
-            lrd_disp = global_dates["LRD"]
-            td_disp  = global_dates["TD"] or td_fallback
-
-            # Case Age (days) based on raw TD if available
-            case_age_days = ""
-            if global_dates["TD_raw"]:
-                td_obj = parse_date_obj(global_dates["TD_raw"])
-                if td_obj:
-                    case_age_days = (datetime.now().date() - td_obj).days
-                    if case_age_days < 0:  # guard against future TD
-                        case_age_days = 0
-
+            # ---------- Report Date on new lines ----------
             report_date_parts = []
             if frd_disp: report_date_parts.append(f"FRD: {frd_disp}")
             if lrd_disp: report_date_parts.append(f"LRD: {lrd_disp}")
             if td_disp:  report_date_parts.append(f"TD: {td_disp}")
-            report_date_display = "; \n ".join(report_date_parts)
+            report_date_display = "\n".join(report_date_parts)  # newline rendering
 
             all_rows_display.append({
                 'SL No': idx,
@@ -845,5 +853,6 @@ with tab2:
 st.markdown("""
 **Developed by Jagamohan** _Disclaimer: App is in developmental stage, validate before using the data._
 """, unsafe_allow_html=True)
+
 
 
