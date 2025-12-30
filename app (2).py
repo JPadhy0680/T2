@@ -13,11 +13,12 @@ st.markdown(""" """, unsafe_allow_html=True)
 st.title("📊🧠 E2B_R3 XML Triage Application 🛠️ 🚀")
 
 # Version header
-# v1.5.8-global-frd-lrd-td:
-# - Report Date column uses GLOBAL scope:
-#   LRD = first <availabilityTime value> in the entire XML (document order).
-#   FRD = immediately prior <low value> seen before that availabilityTime (global).
-#   TD  = first <creationTime value> if present.
+# v1.5.8-global-frd-lrd-td + MAH fix:
+# - Report Date column uses GLOBAL scope (entire XML):
+#   LRD = first <availabilityTime value>.
+#   FRD = immediately prior <low value> (any <low> before that availabilityTime).
+#   TD  = first <creationTime value>.
+# - get_mah_name_for_drug defined above usage and robustly returns MAH name or "".
 # - All other app logic unchanged.
 
 # --------------------- Helpers & Maps ---------------------
@@ -54,13 +55,7 @@ with st.expander("📖 Instructions"):
 - Only **App Assessment** is editable.
 """)
 
-# Tabs
-tab1, tab2 = st.tabs(["Upload & Parse", "Export & Edit"])
-if "uploader_version" not in st.session_state:
-    st.session_state["uploader_version"] = 0
-all_rows_display = []
-current_date = datetime.now().strftime("%d-%b-%Y")
-
+# Value mappers
 def _digits_only(s: str) -> str:
     return re.sub(r"\D", "", (s or "").strip())
 
@@ -114,7 +109,6 @@ def map_outcome(code):
     return {"1": "Recovered/Resolved", "2": "Recovering/Resolving", "3": "Not recovered/Ongoing", "4": "Recovered with sequelae", "5": "Fatal", "0": "Unknown"}.get(code, "Unknown")
 
 AGE_UNIT_MAP = {"a": "year", "b": "month"}
-
 def map_age_unit(raw_unit: str) -> str:
     if raw_unit is None:
         return ""
@@ -122,7 +116,6 @@ def map_age_unit(raw_unit: str) -> str:
     return AGE_UNIT_MAP.get(ru, ru)
 
 UNKNOWN_TOKENS = {"unk", "asku", "unknown"}
-
 def is_unknown(value: str) -> bool:
     if value is None:
         return True
@@ -152,7 +145,6 @@ def contains_company_product(text: str, company_products: list) -> str:
     return ""
 
 MG_PATTERN = re.compile(r"\(\d{1,3}(?:,\d{3})*\d+(?:\.\d{1,3})?\)\s*mg\b", re.IGNORECASE)
-
 def extract_strength_mg(raw_text: str, dose_val: str, dose_unit: str) -> Optional[float]:
     if dose_val and dose_unit and dose_unit.lower() == "mg":
         try:
@@ -169,7 +161,6 @@ def extract_strength_mg(raw_text: str, dose_val: str, dose_unit: str) -> Optiona
     return None
 
 PL_PATTERN = re.compile(r'\b(PL|PLGB|PLNI)\s*([0-9]{5})\s*/\s*([0-9]{4,5})\b', re.IGNORECASE)
-
 def extract_pl_numbers(text: str):
     out = []
     if not text:
@@ -187,38 +178,23 @@ COMMON_FORM_WORDS = {
     'patch','dose','strength','film','coated','extended','release','prn'
 }
 
-def detect_molecule_name_differ(raw_name: str, my_company: str, competitor_names: Set[str]) -> bool:
-    import re as _re
-    if not raw_name:
-        return False
-    text = str(raw_name)
-    tags = []
-    tags += _re.findall(r"\[(.*?)\]", text)
-    tags += _re.findall(r"\bby\s+([A-Za-z &.]+)", text, flags=_re.IGNORECASE)
-    parts = [p.strip() for p in _re.split(r"\s+--\s+|\s*-\s*-", text) if p.strip()]
-    if len(parts) >= 2:
-        tags.append(parts[-1])
-
-    def norm(u):
-        return _re.sub(r"[^a-z0-9 ]"," ", str(u).lower()).strip()
-
-    my_norm = norm(my_company)
-    for t in tags:
-        tn = norm(t)
-        if not tn or tn in COMMON_FORM_WORDS:
-            continue
-        tokens = [w for w in tn.split() if w not in COMMON_FORM_WORDS]
-        if not tokens:
-            continue
-        if my_norm and my_norm in tn:
-            continue
-        for comp in competitor_names:
-            cn = norm(comp)
-            if cn and cn in tn:
-                return True
-        if _re.search(r"[a-z]{3,}", tn):
-            return True
-    return False
+# -------- FIXED: MAH extraction helper, defined before use & robust --------
+def get_mah_name_for_drug(drug_elem, ns) -> str:
+    """
+    Safely returns MAH name local to a product element, or "" if not found.
+    """
+    if drug_elem is None:
+        return ""
+    paths = [
+        './/hl7:playingOrganization/hl7:name',
+        './/hl7:manufacturerOrganization/hl7:name',
+        './/hl7:asManufacturedProduct/hl7:manufacturerOrganization/hl7:name',
+    ]
+    for p in paths:
+        node = drug_elem.find(p, ns)
+        if node is not None and node.text and node.text.strip():
+            return node.text.strip()
+    return ""
 
 company_products = [
     "abiraterone", "apixaban", "apremilast", "bexarotene",
@@ -316,7 +292,7 @@ def contains_competitor_name(lot_text: str, competitor_names: Set[str]) -> bool:
             return True
     return False
 
-# --------------------- NEW: Global FRD/LRD/TD ---------------------
+# --------------------- GLOBAL FRD/LRD/TD ---------------------
 def local_name(tag: str) -> str:
     return tag.split('}')[-1] if '}' in tag else tag
 
@@ -327,9 +303,8 @@ def extract_global_frd_lrd_td(root):
       - Walk all elements:
           keep last <low value> seen;
           first <availabilityTime value> => LRD; FRD = that prior low.
-      - Returns formatted (FRD, LRD, TD) and raw values.
+      - Returns both raw and formatted values.
     """
-    # TD (first creationTime)
     td_raw = None
     for el in root.iter():
         if local_name(el.tag) == "creationTime":
@@ -368,6 +343,12 @@ def extract_global_frd_lrd_td(root):
 
 # --------------------- UI: Upload & Parse ---------------------
 
+tab1, tab2 = st.tabs(["Upload & Parse", "Export & Edit"])
+if "uploader_version" not in st.session_state:
+    st.session_state["uploader_version"] = 0
+all_rows_display = []
+current_date = datetime.now().strftime("%d-%b-%Y")
+
 with tab1:
     st.markdown("### 🔎 Upload Files 🗂️")
     if st.button("Clear Inputs", help="Clear uploaded XMLs and parsed data (keep access)."):
@@ -392,6 +373,7 @@ with tab1:
         if "LLT Code" in mapping_df.columns:
             mapping_df["LLT Code"] = mapping_df["LLT Code"].astype(str).str.strip()
 
+    # Listedness reference
     listed_pairs: Set[Tuple[str, str]] = set()
     if listed_ref_file:
         try:
@@ -444,16 +426,16 @@ with tab1:
             sender_elem = root.find('.//hl7:id[@root="2.16.840.1.113883.3.989.2.1.3.1"]', ns)
             sender_id = clean_value(sender_elem.attrib.get('extension', '') if sender_elem is not None else '')
 
-            # Transmission Date (TD)
+            # Fallback TD (from creationTime) for case-age
             creation_elem = root.find('.//hl7:creationTime', ns)
             creation_raw = creation_elem.attrib.get('value', '') if creation_elem is not None else ''
-            td_fallback = clean_value(format_date(creation_raw))  # fallback TD if global doesn't find
+            td_fallback = clean_value(format_date(creation_raw))  # use if global TD is empty
 
             # Reporter Qualification
             reporter_elem = root.find('.//hl7:asQualifiedEntity/hl7:code', ns)
             reporter_qualification = clean_value(map_reporter(reporter_elem.attrib.get('code', '') if reporter_elem is not None else ''))
 
-            # Patient block
+            # Patient details
             gender_elem = root.find('.//hl7:administrativeGenderCode', ns)
             gender_mapped = map_gender(gender_elem.attrib.get('code', '') if gender_elem is not None else '')
             gender = clean_value(gender_mapped)
@@ -539,7 +521,7 @@ with tab1:
             product_details_list = []
             case_has_category2 = False
             case_drug_dates_display = []
-            case_event_dates = []  # unchanged, used for validity checks
+            case_event_dates = []
             case_displayed_mahs = []
             case_products_norm: Set[str] = set()
 
@@ -585,8 +567,7 @@ with tab1:
                     start_date_disp = clean_value(format_date(start_date_str))
                     stop_date_disp = clean_value(format_date(stop_date_str))
 
-                    # MAH (local to product element)
-                    mah_name_raw = get_mah_name_for_drug(drug, ns)
+                    mah_name_raw = get_mah_name_for_drug(drug, ns)  # <<-- FIXED helper, safe
                     mah_name_clean = clean_value(mah_name_raw)
 
                     if matched_company_prod:
@@ -640,15 +621,9 @@ with tab1:
                             parts.append(f"MAH: {mah_name_clean}")
                         case_displayed_mahs.append(mah_name_clean)
 
-                        pl_hits = set()
                         for t in [display_name, text_clean, form_clean, lot_clean]:
                             for pl in extract_pl_numbers(t):
-                                pl_hits.add(pl)
-                        for pl in sorted(pl_hits):
-                            if display_name:
-                                comments.append(f"plz check product name as {display_name} {pl} given")
-                            else:
-                                comments.append(f"plz check product name: {pl} given")
+                                comments.append(f"plz check product name as {display_name} {pl} given" if display_name else f"plz check product name: {pl} given")
 
                         if lot_clean and contains_competitor_name(lot_clean, competitor_names):
                             comments.append(f"Lot number '{lot_clean}' may belong to another company — please verify.")
@@ -666,7 +641,7 @@ with tab1:
             case_has_serious_event = False
             event_listedness_items = []
 
-            # Events summary (unchanged except no FRD/LRD from events now)
+            # Events (summary only; FRD/LRD now from global rule)
             for reaction in root.findall('.//hl7:observation', ns):
                 code_elem = reaction.find('hl7:code', ns)
                 if code_elem is not None and code_elem.attrib.get('displayName') == 'reaction':
@@ -706,7 +681,6 @@ with tab1:
                         ev_status = assess_event_listedness(llt_norm, case_products_norm, listed_pairs, ref_drugs)
                     event_listedness_items.append(f"Event {event_count}: {ev_status}")
 
-                    # Seriousness
                     seriousness_flags = []
                     for criterion in seriousness_criteria:
                         criterion_elem = reaction.find(f'.//hl7:code[@displayName="{criterion}"]/../hl7:value', ns)
@@ -716,12 +690,10 @@ with tab1:
                     if seriousness_flags:
                         case_has_serious_event = True
 
-                    # Outcome
                     outcome_elem = reaction.find('.//hl7:code[@displayName="outcome"]/../hl7:value', ns)
                     outcome = map_outcome(outcome_elem.attrib.get('code', '') if outcome_elem is not None else '')
                     outcome = clean_value(outcome)
 
-                    # Event start/end (unchanged)
                     evt_low = reaction.find('.//hl7:effectiveTime/hl7:low', ns)
                     evt_high = reaction.find('.//hl7:effectiveTime/hl7:high', ns)
                     evt_low_str = evt_low.attrib.get('value', '') if evt_low is not None else ''
@@ -744,8 +716,8 @@ with tab1:
 
             event_details_combined_display = "\n".join(event_details_list)
 
-            # Reportability (unchanged)
-            reportability = "Category 2, serious, reportable case" if (case_has_serious_event and case_products_norm.intersection(category2_products)) else "Non-Reportable"
+            # Reportability (unchanged: serious + category2)
+            reportability = "Category 2, serious, reportable case" if (case_has_serious_event and case_has_category2) else "Non-Reportable"
 
             # -------- Validity assessment (unchanged; limited to displayed drugs) --------
             validity_reason: Optional[str] = None
@@ -806,6 +778,15 @@ with tab1:
             lrd_disp = global_dates["LRD"]
             td_disp  = global_dates["TD"] or td_fallback
 
+            # Case Age (days) based on raw TD if available
+            case_age_days = ""
+            if global_dates["TD_raw"]:
+                td_obj = parse_date_obj(global_dates["TD_raw"])
+                if td_obj:
+                    case_age_days = (datetime.now().date() - td_obj).days
+                    if case_age_days < 0:  # guard against future TD
+                        case_age_days = 0
+
             report_date_parts = []
             if frd_disp: report_date_parts.append(f"FRD: {frd_disp}")
             if lrd_disp: report_date_parts.append(f"LRD: {lrd_disp}")
@@ -817,7 +798,7 @@ with tab1:
                 'Date': current_date,
                 'Sender ID': sender_id,
                 'Report Date': report_date_display,
-                'Case Age (days)': (datetime.now().date() - parse_date_obj(global_dates["TD_raw"])).days if global_dates["TD_raw"] else "",
+                'Case Age (days)': case_age_days,
                 'Reporter Qualification': reporter_qualification,
                 'Patient Detail': patient_detail,
                 'Product Detail': " \n ".join(product_details_list),
@@ -864,4 +845,5 @@ with tab2:
 st.markdown("""
 **Developed by Jagamohan** _Disclaimer: App is in developmental stage, validate before using the data._
 """, unsafe_allow_html=True)
+
 
