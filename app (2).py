@@ -14,43 +14,15 @@ st.markdown(""" """, unsafe_allow_html=True)
 st.title("\U0001F4CA\U0001F9E0 E2B_R3 XML Triage Application \U0001F6E0️ \U0001F680")
 
 # ---------------------------------------------------------------------------------------------------------
-# v1.10.0 - per-product event-wise listedness display
+# v1.10.2 - per-product event-wise listedness display, password removed, no debug prints
 # - Event Details column shows ONLY clinical details (no "Listedness:" fragments).
 # - Listedness column:
 #    * If exactly one Celix suspect product: show per-event lines (e.g., "Event 1: Listed").
 #    * If 2+ Celix suspects: show one line per product as:
-#        "<Drug Name> - Event 1: Listed; Event 2: Unlisted; ..."
+#        "<Drug> - Event 1: Listed; Event 2: Unlisted; ..."
 # - Listedness is blank for Non-Valid cases.
-# - No case-level Listedness column. No App Assessment column. Read-only table.
+# - Case-level Listedness column removed. App Assessment removed. Read-only table.
 # ---------------------------------------------------------------------------------------------------------
-
-def _get_password():
-    DEFAULT_PASSWORD = "7064242966"
-    try:
-        return st.secrets["auth"]["password"]
-    except Exception:
-        return DEFAULT_PASSWORD
-
-def is_authenticated() -> bool:
-    exp = st.session_state.get("auth_expires", None)
-    if exp and datetime.now() < exp:
-        return True
-    return False
-
-# Simple access gate
-if not is_authenticated():
-    password = st.text_input(
-        "Enter Password to Access App:",
-        type="password",
-        help="Enter the password to unlock the application."
-    )
-    if password == _get_password():
-        st.session_state["auth_expires"] = datetime.now() + timedelta(hours=24)
-        st.success("Access granted for 24 hours.")
-    else:
-        if password:
-            st.warning("Please enter the correct password to proceed.")
-        st.stop()
 
 with st.expander("\U0001F4D6 Instructions"):
     st.markdown("""
@@ -58,7 +30,7 @@ with st.expander("\U0001F4D6 Instructions"):
 - (Optional) Upload **LLT–PT mapping Excel** to enrich event names.
 - (Optional) Upload **Listedness Excel** with two columns: **Drug Name**, **LLT**.
   We will compute **Listedness per event** and show it in a separate **Listedness** column.
-- If the case has **2 or more Celix suspect products**, the **Listedness** column will show one line per product:
+- If the case has **2 or more Celix suspect products**, the **Listedness** column shows one line per product:
   `Drug X - Event 1: Listed; Event 2: Unlisted; ...`
 - Parsed data appears in the **Export & Edit** tab. **All columns are read-only.**
 """)
@@ -265,7 +237,12 @@ LAUNCH_INFO = {
     "pirfenidone": ("launched", parse_dd_mmm_yy("29-Jun-22")),
     "raltegravir": ("awaited", None),
     "ranolazine": ("launched", parse_dd_mmm_yy("20-Jul-23")),
-    "rivaroxaban": ("launched_by_strength", {2.5: parse_dd_mmm_yy("02-Apr-24"), 10.0: parse_dd_mmm_yy("23-May-24"), 15.0: parse_dd_mmm_yy("23-May-24"), 20.0: parse_dd_mmm_yy("23-May-24")}),
+    "rivaroxaban": ("launched_by_strength", {
+        2.5: parse_dd_mmm_yy("02-Apr-24"),
+        10.0: parse_dd_mmm_yy("23-May-24"),
+        15.0: parse_dd_mmm_yy("23-May-24"),
+        20.0: parse_dd_mmm_yy("23-May-24")
+    }),
     "saxagliptin": ("yet", None),
     "sitagliptin": ("yet", None),
     "tamsulosin + solifenacin": ("launched", parse_dd_mmm_yy("08-May-23")),
@@ -384,12 +361,9 @@ current_date = datetime.now().strftime("%d-%b-%Y")
 with tab1:
     st.markdown("### \U0001F50E Upload Files \U0001F5C2️")
     if st.button("Clear Inputs", help="Clear uploaded XMLs and parsed data (keep access)."):
-        auth_exp = st.session_state.get("auth_expires")
         for k in ["df_display", "edited_df"]:
             st.session_state.pop(k, None)
         st.session_state["uploader_version"] = st.session_state.get("uploader_version", 0) + 1
-        if auth_exp:
-            st.session_state["auth_expires"] = auth_exp
         st.rerun()
 
     ver = st.session_state.get("uploader_version", 0)
@@ -574,8 +548,7 @@ with tab1:
             case_event_dates: List[Tuple[str, Optional[date], Optional[date]]] = []
             case_displayed_mahs: List[str] = []
             case_products_norm: Set[str] = set()
-            # NEW: map normalized Celix product -> pretty display name
-            product_norm_to_pretty: Dict[str, str] = {}
+            product_norm_to_pretty: Dict[str, str] = {}  # normalized -> display name
 
             displayed_drugs_assessment: List[Tuple[str, str]] = []  # (display_name_for_detail, non_valid_reason_or_empty)
 
@@ -619,7 +592,6 @@ with tab1:
                         norm_key = normalize_text(matched_company_prod)
                         case_products_norm.add(norm_key)
                         product_id_to_normname[drug_id] = norm_key
-                        # choose a pretty name to display
                         pretty_name = raw_drug_text if raw_drug_text else matched_company_prod.title()
                         product_norm_to_pretty.setdefault(norm_key, clean_value(pretty_name))
                         if norm_key in category2_products:
@@ -746,7 +718,6 @@ with tab1:
             # Events summary (FRD/LRD now global)
             seriousness_criteria = list(seriousness_map.keys())
             event_details_list: List[str] = []
-            # keep norm LLT per event index for later per-product listedness summary
             event_llts_norm: List[str] = []
             event_count = 1
             case_has_serious_event = False
@@ -775,7 +746,7 @@ with tab1:
                     if not llt_term and value_elem is not None:
                         llt_term = value_elem.attrib.get('displayName', '') or llt_term
 
-                    # keep normalized LLT for later per-product listedness checks
+                    # keep normalized LLT for per-product listedness checks
                     llt_norm = normalize_text(llt_term)
                     event_llts_norm.append(llt_norm)
 
@@ -924,22 +895,21 @@ with tab1:
             # ---- LISTEDNESS (EVENT ONLY; PER-PRODUCT SUMMARY WHEN MULTI-PRODUCT) ----
             event_wise_listedness_display = ""
             if not is_non_valid_case and event_llts_norm:
-                # Build per-product per-event status
                 if len(case_products_norm) <= 1:
-                    # Single product (or none) -> simple per-event line without product name
+                    # Single Celix suspect (or none): per-event lines without product name
                     lines = []
+                    products_to_check = list(case_products_norm) if case_products_norm else []
                     for i, llt_norm in enumerate(event_llts_norm, start=1):
                         is_listed = False
-                        for pnorm in case_products_norm or []:
+                        for pnorm in products_to_check:
                             if (pnorm, llt_norm) in listedness_pairs:
                                 is_listed = True
                                 break
                         lines.append(f"Event {i}: {'Listed' if is_listed else 'Unlisted'}")
                     event_wise_listedness_display = "\n".join(lines)
                 else:
-                    # Multiple Celix suspects -> line per product with per-event statuses
+                    # 2+ Celix suspects: one line per product with per-event statuses
                     prod_lines: List[str] = []
-                    # order by pretty product name if available
                     sorted_products = sorted(list(case_products_norm), key=lambda k: product_norm_to_pretty.get(k, k))
                     for pnorm in sorted_products:
                         pretty = product_norm_to_pretty.get(pnorm, pnorm)
@@ -947,11 +917,10 @@ with tab1:
                         for i, llt_norm in enumerate(event_llts_norm, start=1):
                             is_listed = (pnorm, llt_norm) in listedness_pairs
                             statuses.append(f"Event {i}: {'Listed' if is_listed else 'Unlisted'}")
-                        prod_lines.append(f"{pretty} - " + "; ".join([]))
-                        prod_lines[-1] = f"{pretty} - " + "; ".join(statuses)
+                        prod_lines.append(f"{pretty} - " + "; ".join(statuses))
                     event_wise_listedness_display = "\n".join(prod_lines)
 
-            # (Ensure is_non_valid_case exists here even if code is refactored above)
+            # Safety net for the flag
             try:
                 is_non_valid_case
             except NameError:
@@ -997,7 +966,7 @@ with tab2:
         ]
         df_display = df_display[[c for c in preferred_order if c in df_display.columns]]
 
-        # Read-only grid (no App Assessment column)
+        # Read-only grid
         edited_df = st.data_editor(
             df_display,
             num_rows="dynamic",
@@ -1016,6 +985,7 @@ st.markdown("""
 **Developed by Jagamohan**
 _Disclaimer: App is in developmental stage, validate before using the data._
 """, unsafe_allow_html=True)
+
 
 
 
