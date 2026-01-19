@@ -947,7 +947,7 @@ with tab1:
                         for i, llt_norm in enumerate(event_llts_norm, start=1):
                             is_listed = (pnorm, llt_norm) in listedness_pairs
                             statuses.append(f"Event {i}: {'Listed' if is_listed else 'Unlisted'}")
-                        prod_lines.append(f"{pretty} - "; "".join([]))
+                        prod_lines.append(f"{pretty} - " + "; ".join([]))
                         prod_lines[-1] = f"{pretty} - " + "; ".join(statuses)
                     event_wise_listedness_display = "\n".join(prod_lines)
 
