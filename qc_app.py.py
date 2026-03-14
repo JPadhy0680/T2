@@ -94,9 +94,12 @@ def findall(root, xpath) -> List[ET.Element]:
 def mismatch_marker(a: Any, b: Any, is_date=False) -> str:
     if is_date:
         da, db = parse_date_obj(a or ""), parse_date_obj(b or "")
-        if da == db and da is not None:  # same calendar day → no marker
+        if da == db and da is not None:
             return ""
     return " 🔴" if (str(a) or "") != (str(b) or "") else ""
+
+def has_value(x: str) -> bool:
+    return bool((x or "").strip())
 
 def safe_disp(v: str) -> str:
     return v if v else "—"
@@ -320,15 +323,22 @@ def extract_model(xml_bytes: bytes) -> Dict[str, Any]:
     model["Narrative"] = extract_narrative(root)
     return model
 
-# --------------- Helpers to build comparison tables ----------------
-def compare_table(rows: List[Tuple[str, str, str]], note_date_equiv: bool = False) -> pd.DataFrame:
-    # rows: (Field, src_value, prc_value)
+# --------------- Helpers to build comparison tables (ONLY non-blank rows) ----------------
+def compare_table(rows: List[Tuple[str, str, str]], treat_as_dates: bool = False) -> pd.DataFrame:
+    """
+    rows = [(Field, source_value, processed_value), ...]
+    - Skips any row where BOTH source and processed are blank.
+    - Adds 🔴 marker on processed when values differ (date-equivalent differences are not marked if treat_as_dates=True).
+    """
     disp = []
     for field, s, p in rows:
-        is_date = note_date_equiv
-        marker = mismatch_marker(s, p, is_date=is_date)
-        disp.append({"Field": field, "Source": safe_disp(s), "Processed": safe_disp(p) + marker})
-    return pd.DataFrame(disp)
+        s_str = (s or "").strip()
+        p_str = (p or "").strip()
+        if not s_str and not p_str:
+            continue  # skip fully blank row
+        marker = mismatch_marker(s, p, is_date=treat_as_dates)
+        disp.append({"Field": field, "Source": safe_disp(s_str), "Processed": safe_disp(p_str) + marker})
+    return pd.DataFrame(disp) if disp else pd.DataFrame(columns=["Field","Source","Processed"])
 
 def make_admin_table(src: Dict[str,Any], prc: Dict[str,Any]) -> pd.DataFrame:
     rows = [
@@ -337,13 +347,12 @@ def make_admin_table(src: Dict[str,Any], prc: Dict[str,Any]) -> pd.DataFrame:
         ("FRD",       src.get("FRD","") or format_date(src.get("FRD_raw","")), prc.get("FRD","") or format_date(prc.get("FRD_raw",""))),
         ("LRD",       src.get("LRD","") or format_date(src.get("LRD_raw","")), prc.get("LRD","") or format_date(prc.get("LRD_raw",""))),
     ]
-    # Treat dates as date-equivalent
-    return compare_table(rows, note_date_equiv=True)
+    return compare_table(rows, treat_as_dates=True)
 
 def make_patient_table(src: Dict[str,str], prc: Dict[str,str]) -> pd.DataFrame:
     fields = ["Gender","Age","Age Group","Height","Weight","Initials"]
     rows = [(f, src.get(f,""), prc.get(f,"")) for f in fields]
-    return compare_table(rows)
+    return compare_table(rows, treat_as_dates=False)
 
 def dict_by_key(items: List[Dict[str,Any]]) -> Dict[str, Dict[str,Any]]:
     return {it.get("_key",""): it for it in items if it.get("_key","")}
@@ -365,11 +374,14 @@ def make_product_box(src_rec: Dict[str,Any], prc_rec: Dict[str,Any], title: str)
         s_val = src_rec.get(field,"")
         p_val = prc_rec.get(field,"")
         if kind == "date":
-            # recompute display from raw if present
-            s_val = src_rec.get(field, "") or format_date(src_rec.get(field + " (raw)",""))
-            p_val = prc_rec.get(field, "") or format_date(prc_rec.get(field + " (raw)",""))
+            s_val = s_val or format_date(src_rec.get(field + " (raw)",""))
+            p_val = p_val or format_date(prc_rec.get(field + " (raw)",""))
         rows.append((field, s_val, p_val))
-    st.table(compare_table(rows, note_date_equiv=True))
+    df = compare_table(rows, treat_as_dates=True)
+    if df.empty:
+        st.markdown('<div class="smallnote">No values to display for this drug in either file.</div>', unsafe_allow_html=True)
+    else:
+        st.table(df)
     st.markdown('</div>', unsafe_allow_html=True)
 
 def make_event_box(src_rec: Dict[str,Any], prc_rec: Dict[str,Any], title: str):
@@ -387,10 +399,14 @@ def make_event_box(src_rec: Dict[str,Any], prc_rec: Dict[str,Any], title: str):
         s_val = src_rec.get(field,"")
         p_val = prc_rec.get(field,"")
         if kind == "date":
-            s_val = src_rec.get(field, "") or format_date(src_rec.get(field + " (raw)",""))
-            p_val = prc_rec.get(field, "") or format_date(prc_rec.get(field + " (raw)",""))
+            s_val = s_val or format_date(src_rec.get(field + " (raw)",""))
+            p_val = p_val or format_date(prc_rec.get(field + " (raw)",""))
         rows.append((field, s_val, p_val))
-    st.table(compare_table(rows, note_date_equiv=True))
+    df = compare_table(rows, treat_as_dates=True)
+    if df.empty:
+        st.markdown('<div class="smallnote">No values to display for this event in either file.</div>', unsafe_allow_html=True)
+    else:
+        st.table(df)
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------- UI: Upload & Parse ----------------
@@ -417,12 +433,18 @@ if src.get("_error") or prc.get("_error"):
 # ---------------- SECTION: Admin/Header ----------------
 st.subheader("Admin / Header")
 admin_df = make_admin_table(src, prc)
-st.table(admin_df)
+if admin_df.empty:
+    st.markdown('<div class="box smallnote">No header/admin values present in either file.</div>', unsafe_allow_html=True)
+else:
+    st.table(admin_df)
 
 # ---------------- SECTION: Patient Details ----------------
 st.subheader("Patient Details")
 pat_df = make_patient_table(src.get("Patient",{}), prc.get("Patient",{}))
-st.table(pat_df)
+if pat_df.empty:
+    st.markdown('<div class="box smallnote">No patient values present in either file.</div>', unsafe_allow_html=True)
+else:
+    st.table(pat_df)
 
 # ---------------- SECTION: Drug Details (matched by drug name) ----------------
 st.subheader("Drug Details (suspects) — matched by drug name")
@@ -445,7 +467,6 @@ else:
 st.subheader("Event Details — matched by LLT code (fallback: normalized term)")
 src_evts = src.get("Events", [])
 prc_evts = prc.get("Events", [])
-# build indexes by key
 def idx_events(lst: List[Dict[str,Any]]) -> Dict[str,Dict[str,Any]]:
     return {e.get("_key",""): e for e in lst if e.get("_key","")}
 src_evt_idx = idx_events(src_evts)
@@ -465,25 +486,30 @@ else:
 st.subheader("Narrative")
 show_full = st.checkbox("Show full narrative (may be long)", value=True)
 max_len = None if show_full else 1000
-src_narr = src.get("Narrative","")[:max_len] if max_len else src.get("Narrative","")
-prc_narr = prc.get("Narrative","")[:max_len] if max_len else prc.get("Narrative","")
+src_narr_full = src.get("Narrative","")
+prc_narr_full = prc.get("Narrative","")
+src_narr = src_narr_full[:max_len] if max_len else src_narr_full
+prc_narr = prc_narr_full[:max_len] if max_len else prc_narr_full
 
-st.markdown('<div class="box"><h5>Source</h5>', unsafe_allow_html=True)
-st.code(src_narr or "—")
-st.markdown('</div>', unsafe_allow_html=True)
+if not has_value(src_narr_full) and not has_value(prc_narr_full):
+    st.markdown('<div class="box smallnote">No narrative present in either file.</div>', unsafe_allow_html=True)
+else:
+    st.markdown('<div class="box"><h5>Source</h5>', unsafe_allow_html=True)
+    st.code(src_narr or "—")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="box"><h5>Processed</h5>', unsafe_allow_html=True)
-# annotate mismatch if texts differ (truncated text may affect comparison, but this is fine for display)
-suffix = " 🔴" if (src.get("Narrative","") != prc.get("Narrative","")) else ""
-st.code((prc_narr or "—") + suffix)
-st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div class="box"><h5>Processed</h5>', unsafe_allow_html=True)
+    suffix = " 🔴" if (src_narr_full != prc_narr_full) else ""
+    st.code((prc_narr or "—") + suffix)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-# ---------------- Export (optional) ----------------
+# ---------------- Export (only non-blank rows) ----------------
 st.markdown("---")
 st.markdown("### ⬇️ Download Comparison (Excel)")
-# Build flat sheets
 def rows_from_table(df: pd.DataFrame, section: str) -> List[Dict[str,str]]:
     out = []
+    if df is None or df.empty:
+        return out
     for _, r in df.iterrows():
         out.append({"Section": section, "Field": r["Field"], "Source": r["Source"], "Processed": r["Processed"]})
     return out
@@ -491,6 +517,7 @@ def rows_from_table(df: pd.DataFrame, section: str) -> List[Dict[str,str]]:
 admin_rows = rows_from_table(admin_df, "Admin/Header")
 pat_rows = rows_from_table(pat_df, "Patient")
 
+# Drugs sheet
 prod_rows = []
 for key in all_keys:
     srec = src_idx.get(key, {})
@@ -499,8 +526,10 @@ for key in all_keys:
     for field in ["Dosage Text","Dose Value","Dose Unit","Start Date","Stop Date","Formulation","Lot No","MAH"]:
         s_val = srec.get(field, "") or (format_date(srec.get(field + " (raw)","")) if "Date" in field else "")
         p_val = prec.get(field, "") or (format_date(prec.get(field + " (raw)","")) if "Date" in field else "")
-        prod_rows.append({"Section":"Drug", "Group": title, "Field": field, "Source": s_val or "—", "Processed": p_val or "—"})
+        if has_value(s_val) or has_value(p_val):
+            prod_rows.append({"Section":"Drug", "Group": title, "Field": field, "Source": s_val or "—", "Processed": p_val or "—"})
 
+# Events sheet
 evt_rows = []
 for key in all_evt_keys:
     se = src_evt_idx.get(key, {})
@@ -509,7 +538,8 @@ for key in all_evt_keys:
     for field in ["LLT Code","LLT Term","Seriousness","Outcome","Event Start","Event End"]:
         s_val = se.get(field, "") or (format_date(se.get(field + " (raw)","")) if "Event" in field else "")
         p_val = pe.get(field, "") or (format_date(pe.get(field + " (raw)","")) if "Event" in field else "")
-        evt_rows.append({"Section":"Event", "Group": title, "Field": field, "Source": s_val or "—", "Processed": p_val or "—"})
+        if has_value(s_val) or has_value(p_val):
+            evt_rows.append({"Section":"Event", "Group": title, "Field": field, "Source": s_val or "—", "Processed": p_val or "—"})
 
 excel_buffer = io.BytesIO()
 with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
@@ -518,7 +548,8 @@ with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
         pd.DataFrame(prod_rows).to_excel(writer, index=False, sheet_name="Drugs")
     if evt_rows:
         pd.DataFrame(evt_rows).to_excel(writer, index=False, sheet_name="Events")
-    pd.DataFrame([{"Source Narrative": src.get("Narrative",""),
-                   "Processed Narrative": prc.get("Narrative","")}]).to_excel(writer, index=False, sheet_name="Narrative")
+    if has_value(src.get("Narrative","")) or has_value(prc.get("Narrative","")):
+        pd.DataFrame([{"Source Narrative": src.get("Narrative","") or "—",
+                       "Processed Narrative": prc.get("Narrative","") or "—"}]).to_excel(writer, index=False, sheet_name="Narrative")
 
 st.download_button("Download qc_twofile_compare_tabular.xlsx", excel_buffer.getvalue(), "qc_twofile_compare_tabular.xlsx")
