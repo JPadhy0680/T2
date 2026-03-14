@@ -571,4 +571,3 @@ with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
     pd.DataFrame([flat_extract(prc_model, "processed")]).to_excel(writer, index=False, sheet_name="Extract_Processed")
 
 st.download_button("Download qc_twofile_compare.xlsx", excel_buffer.getvalue(), "qc_twofile_compare.xlsx")
-``
