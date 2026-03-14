@@ -1,4 +1,4 @@
-# qc_twofile_compare.py
+# qc_twofile_compare_tabular.py
 import streamlit as st
 import pandas as pd
 import xml.etree.ElementTree as ET
@@ -7,12 +7,34 @@ import io, re, calendar
 from typing import Optional, Dict, Any, List, Tuple, Set
 
 # ---------------- UI setup ----------------
-st.set_page_config(page_title="E2B_R3 Two-File Vertical Comparator", layout="wide")
-st.title("🧪📄📄 E2B_R3 Two‑File Vertical Comparator (Vertical Triage View)")
+st.set_page_config(page_title="E2B_R3 Two-File Comparator (Tabular, Box-wise)", layout="wide")
+st.title("🧪📄📄 E2B_R3 Two‑File Comparator — Tabular, Box‑wise")
 
 # ---------------- Utilities ----------------
 NS = {'hl7': 'urn:hl7-org:v3', 'xsi': 'http://www.w3.org/2001/XMLSchema-instance'}
 UNKNOWN_TOKENS = {"unk", "asku", "unknown"}
+SENDER_ID_OID = "2.16.840.1.113883.3.989.2.1.3.1"
+
+TD_PATHS = [
+    './/hl7:transmissionWrapper/hl7:creationTime',
+    './/hl7:ControlActProcess/hl7:effectiveTime',
+    './/hl7:ClinicalDocument/hl7:effectiveTime',
+    './/hl7:creationTime',
+]
+
+# --- styling (simple card / box) ---
+BOX_CSS = """
+<style>
+.box {
+  border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px 12px; margin: 8px 0;
+  background: #fafafa;
+}
+.box h5 { margin: 0 0 8px 0; }
+.diff { color: #b00020; font-weight: 600; } /* red text for mismatches */
+.smallnote { color:#666; font-size: 0.9em; }
+</style>
+"""
+st.markdown(BOX_CSS, unsafe_allow_html=True)
 
 def _digits_only(s: str) -> str:
     return re.sub(r"\D", "", (s or "").strip())
@@ -69,23 +91,24 @@ def find_first(root, xpath) -> Optional[ET.Element]:
 def findall(root, xpath) -> List[ET.Element]:
     return root.findall(xpath, NS)
 
+def mismatch_marker(a: Any, b: Any, is_date=False) -> str:
+    if is_date:
+        da, db = parse_date_obj(a or ""), parse_date_obj(b or "")
+        if da == db and da is not None:  # same calendar day → no marker
+            return ""
+    return " 🔴" if (str(a) or "") != (str(b) or "") else ""
+
+def safe_disp(v: str) -> str:
+    return v if v else "—"
+
 # ---------------- Canonical extraction ----------------
-SENDER_ID_OID = "2.16.840.1.113883.3.989.2.1.3.1"  # same as in your existing app
-
-TD_PATHS = [
-    './/hl7:transmissionWrapper/hl7:creationTime',
-    './/hl7:ControlActProcess/hl7:effectiveTime',
-    './/hl7:ClinicalDocument/hl7:effectiveTime',
-    './/hl7:creationTime',
-]
-
 def extract_sender_id(root: ET.Element) -> str:
     e = find_first(root, f'.//hl7:id[@root="{SENDER_ID_OID}"]')
     return clean_value(e.attrib.get('extension', '')) if e is not None else ""
 
 def extract_td_frd_lrd(root: ET.Element) -> Dict[str, str]:
     out = {"TD_raw":"", "TD":"", "FRD_raw":"", "FRD":"", "LRD_raw":"", "LRD":""}
-    # TD by priority paths
+    # TD (priority)
     for p in TD_PATHS:
         e = find_first(root, p)
         if e is not None:
@@ -93,14 +116,14 @@ def extract_td_frd_lrd(root: ET.Element) -> Dict[str, str]:
             if val:
                 out["TD_raw"] = val; out["TD"] = format_date(val)
                 break
-    # LRD from explicit availabilityTime (first encountered)
+    # LRD: explicit availabilityTime (first)
     for el in root.iter():
         ln = el.tag.split('}')[-1] if '}' in el.tag else el.tag
         if ln == 'availabilityTime':
             v = el.attrib.get('value')
             if v:
                 out["LRD_raw"] = v; out["LRD"] = format_date(v); break
-    # FRD heuristic: earliest <low> in the document (safer than "last low")
+    # FRD: earliest <low>
     lows = []
     for el in root.iter():
         ln = el.tag.split('}')[-1] if '}' in el.tag else el.tag
@@ -147,7 +170,7 @@ def extract_patient(root: ET.Element) -> Dict[str, str]:
         hu = clean_value(height_elem.attrib.get('unit',''))
         height = f"{hv}{(' ' + hu) if hv and hu else ''}"
 
-    # Initials (with mask handling)
+    # Initials
     initials = ""
     nm = find_first(root, './/hl7:player1/hl7:name')
     if nm is not None:
@@ -161,9 +184,8 @@ def extract_patient(root: ET.Element) -> Dict[str, str]:
             if fam is not None and fam.text and fam.text.strip(): parts.append(fam.text.strip()[0].upper())
             initials = "".join(parts) or clean_value(get_text(nm))
     return {
-        "gender": clean_value(gender), "age": clean_value(age),
-        "age_group": clean_value(age_group), "height": clean_value(height),
-        "weight": clean_value(weight), "initials": clean_value(initials),
+        "Gender": clean_value(gender), "Age": clean_value(age), "Age Group": clean_value(age_group),
+        "Height": clean_value(height), "Weight": clean_value(weight), "Initials": clean_value(initials),
     }
 
 def extract_suspect_ids(root: ET.Element) -> Set[str]:
@@ -182,7 +204,8 @@ def extract_products(root: ET.Element) -> List[Dict[str, str]]:
     for drug in findall(root, './/hl7:substanceAdministration'):
         id_elem = find_first(drug, './/hl7:id')
         drug_id = id_elem.attrib.get('root','') if id_elem is not None else ''
-        if drug_id in suspects:  # only suspects (as per your triage)
+        if drug_id in suspects:  # only suspects
+            # name
             nm = find_first(drug, './/hl7:kindOfProduct/hl7:name')
             raw_name = ""
             if nm is not None:
@@ -194,18 +217,20 @@ def extract_products(root: ET.Element) -> List[Dict[str, str]]:
                 alt = find_first(drug, './/hl7:manufacturedProduct/hl7:name')
                 raw_name = get_text(alt)
 
+            # dose text/value/unit
             txt = get_text(find_first(drug, './/hl7:text'))
             dq = find_first(drug, './/hl7:doseQuantity')
             dose_v = dq.attrib.get('value','') if dq is not None else ''
             dose_u = dq.attrib.get('unit','') if dq is not None else ''
 
+            # dates
             low = find_first(drug, './/hl7:low'); high = find_first(drug, './/hl7:high')
             sd_raw = low.attrib.get('value','') if low is not None else ''
             ed_raw = high.attrib.get('value','') if high is not None else ''
 
+            # form / lot / MAH
             form = get_text(find_first(drug, './/hl7:formCode/hl7:originalText'))
             lot = get_text(find_first(drug, './/hl7:lotNumberText'))
-
             mah = ""
             for p in [
                 './/hl7:playingOrganization/hl7:name',
@@ -217,15 +242,16 @@ def extract_products(root: ET.Element) -> List[Dict[str, str]]:
                     mah = get_text(node); break
 
             products.append({
-                "name": clean_value(raw_name),
-                "dose_text": clean_value(txt),
-                "dose_value": clean_value(dose_v),
-                "dose_unit": clean_value(dose_u),
-                "start_raw": sd_raw, "start": format_date(sd_raw),
-                "end_raw": ed_raw, "end": format_date(ed_raw),
-                "form": clean_value(form),
-                "lot": clean_value(lot),
-                "mah": clean_value(mah)
+                "Drug": clean_value(raw_name),
+                "Dosage Text": clean_value(txt),
+                "Dose Value": clean_value(dose_v),
+                "Dose Unit": clean_value(dose_u),
+                "Start Date (raw)": sd_raw, "Start Date": format_date(sd_raw),
+                "Stop Date (raw)": ed_raw, "Stop Date": format_date(ed_raw),
+                "Formulation": clean_value(form),
+                "Lot No": clean_value(lot),
+                "MAH": clean_value(mah),
+                "_key": normalize_text(raw_name) if raw_name else "",  # for matching
             })
     return products
 
@@ -266,12 +292,13 @@ def extract_events(root: ET.Element) -> List[Dict[str, Any]]:
             ed_raw = high.attrib.get('value','') if high is not None else ''
 
             out.append({
-                "llt_code": clean_value(llt_code),
-                "llt_term": clean_value(llt_term),
-                "seriousness": "Non-serious" if not flags else ", ".join(sorted(set(flags))),
-                "outcome": clean_value(outcome),
-                "start_raw": sd_raw, "start": format_date(sd_raw),
-                "end_raw": ed_raw, "end": format_date(ed_raw),
+                "LLT Code": clean_value(llt_code),
+                "LLT Term": clean_value(llt_term),
+                "Seriousness": "Non-serious" if not flags else ", ".join(sorted(set(flags))),
+                "Outcome": clean_value(outcome),
+                "Event Start (raw)": sd_raw, "Event Start": format_date(sd_raw),
+                "Event End (raw)": ed_raw, "Event End": format_date(ed_raw),
+                "_key": clean_value(llt_code) or normalize_text(llt_term),
             })
     return out
 
@@ -285,34 +312,89 @@ def extract_model(xml_bytes: bytes) -> Dict[str, Any]:
     except Exception as e:
         return {"_error": f"XML parse error: {e}"}
     model: Dict[str, Any] = {}
-    model["sender_id"] = extract_sender_id(root)
-    model.update(extract_td_frd_lrd(root))          # TD/FRD/LRD
-    model["patient"] = extract_patient(root)        # patient block
-    model["products"] = extract_products(root)      # suspects only
-    model["events"] = extract_events(root)          # reaction observations
-    model["narrative"] = extract_narrative(root)    # clinical narrative (optional)
+    model["Sender ID"] = extract_sender_id(root)
+    model.update(extract_td_frd_lrd(root))  # TD/FRD/LRD (store raw & formatted)
+    model["Patient"] = extract_patient(root)
+    model["Products"] = extract_products(root)
+    model["Events"] = extract_events(root)
+    model["Narrative"] = extract_narrative(root)
     return model
 
-# ---------------- Diff helpers (for icons, Excel, and small severity tags) ----------------
-def same_day(a_raw: str, b_raw: str) -> bool:
-    da, db = parse_date_obj(a_raw or ""), parse_date_obj(b_raw or "")
-    return (da is not None and db is not None and da == db)
+# --------------- Helpers to build comparison tables ----------------
+def compare_table(rows: List[Tuple[str, str, str]], note_date_equiv: bool = False) -> pd.DataFrame:
+    # rows: (Field, src_value, prc_value)
+    disp = []
+    for field, s, p in rows:
+        is_date = note_date_equiv
+        marker = mismatch_marker(s, p, is_date=is_date)
+        disp.append({"Field": field, "Source": safe_disp(s), "Processed": safe_disp(p) + marker})
+    return pd.DataFrame(disp)
 
-def differ(a: Any, b: Any) -> bool:
-    return (str(a) or "") != (str(b) or "")
+def make_admin_table(src: Dict[str,Any], prc: Dict[str,Any]) -> pd.DataFrame:
+    rows = [
+        ("Sender ID", src.get("Sender ID",""), prc.get("Sender ID","")),
+        ("TD",        src.get("TD","") or format_date(src.get("TD_raw","")), prc.get("TD","") or format_date(prc.get("TD_raw",""))),
+        ("FRD",       src.get("FRD","") or format_date(src.get("FRD_raw","")), prc.get("FRD","") or format_date(prc.get("FRD_raw",""))),
+        ("LRD",       src.get("LRD","") or format_date(src.get("LRD_raw","")), prc.get("LRD","") or format_date(prc.get("LRD_raw",""))),
+    ]
+    # Treat dates as date-equivalent
+    return compare_table(rows, note_date_equiv=True)
 
-def mismatch_icon(a: Any, b: Any) -> str:
-    return " 🔴" if differ(a, b) else ""
+def make_patient_table(src: Dict[str,str], prc: Dict[str,str]) -> pd.DataFrame:
+    fields = ["Gender","Age","Age Group","Height","Weight","Initials"]
+    rows = [(f, src.get(f,""), prc.get(f,"")) for f in fields]
+    return compare_table(rows)
 
-def safe_display(v: str) -> str:
-    return v if v else "—"
+def dict_by_key(items: List[Dict[str,Any]]) -> Dict[str, Dict[str,Any]]:
+    return {it.get("_key",""): it for it in items if it.get("_key","")}
 
-def add_diff_row(diff_rows: List[Dict[str, str]], path: str, left: str, right: str, severity: str):
-    if differ(left, right):
-        diff_rows.append({"field_path": path, "source": left, "processed": right, "severity": severity})
+def make_product_box(src_rec: Dict[str,Any], prc_rec: Dict[str,Any], title: str):
+    st.markdown(f'<div class="box"><h5>Drug: {title}</h5>', unsafe_allow_html=True)
+    fields = [
+        ("Dosage Text","text"),
+        ("Dose Value","text"),
+        ("Dose Unit","text"),
+        ("Start Date","date"),
+        ("Stop Date","date"),
+        ("Formulation","text"),
+        ("Lot No","text"),
+        ("MAH","text"),
+    ]
+    rows = []
+    for field, kind in fields:
+        s_val = src_rec.get(field,"")
+        p_val = prc_rec.get(field,"")
+        if kind == "date":
+            # recompute display from raw if present
+            s_val = src_rec.get(field, "") or format_date(src_rec.get(field + " (raw)",""))
+            p_val = prc_rec.get(field, "") or format_date(prc_rec.get(field + " (raw)",""))
+        rows.append((field, s_val, p_val))
+    st.table(compare_table(rows, note_date_equiv=True))
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def make_event_box(src_rec: Dict[str,Any], prc_rec: Dict[str,Any], title: str):
+    st.markdown(f'<div class="box"><h5>Event: {title}</h5>', unsafe_allow_html=True)
+    fields = [
+        ("LLT Code","text"),
+        ("LLT Term","text"),
+        ("Seriousness","text"),
+        ("Outcome","text"),
+        ("Event Start","date"),
+        ("Event End","date"),
+    ]
+    rows = []
+    for field, kind in fields:
+        s_val = src_rec.get(field,"")
+        p_val = prc_rec.get(field,"")
+        if kind == "date":
+            s_val = src_rec.get(field, "") or format_date(src_rec.get(field + " (raw)",""))
+            p_val = prc_rec.get(field, "") or format_date(prc_rec.get(field + " (raw)",""))
+        rows.append((field, s_val, p_val))
+    st.table(compare_table(rows, note_date_equiv=True))
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------- UI: Upload & Parse ----------------
-st.markdown("### 📤 Upload the two XML files you want to compare (no case ID pairing used)")
+st.markdown("### 📤 Upload the two XML files you want to compare (no ID pairing; exact files compared)")
 c1, c2 = st.columns(2)
 with c1:
     src_file = st.file_uploader("Source XML", type=["xml"], key="src_xml")
@@ -320,254 +402,123 @@ with c2:
     prc_file = st.file_uploader("Processed XML", type=["xml"], key="prc_xml")
 
 if not (src_file and prc_file):
-    st.info("Please upload **both** Source and Processed XML files to view the vertical triage comparison.")
+    st.info("Please upload **both** Source and Processed XML files to view the tabular comparison.")
     st.stop()
 
-# Parse both files
 with st.spinner("Parsing Source..."):
-    src_model = extract_model(src_file.read())
+    src = extract_model(src_file.read())
 with st.spinner("Parsing Processed..."):
-    prc_model = extract_model(prc_file.read())
+    prc = extract_model(prc_file.read())
 
-if src_model.get("_error") or prc_model.get("_error"):
-    st.error(f"Source error: {src_model.get('_error','-')}\nProcessed error: {prc_model.get('_error','-')}")
+if src.get("_error") or prc.get("_error"):
+    st.error(f"Source error: {src.get('_error','-')}\nProcessed error: {prc.get('_error','-')}")
     st.stop()
 
-# ---------------- Build Diffs (for export) ----------------
-diff_rows: List[Dict[str, str]] = []
+# ---------------- SECTION: Admin/Header ----------------
+st.subheader("Admin / Header")
+admin_df = make_admin_table(src, prc)
+st.table(admin_df)
 
-# Header diffs
-add_diff_row(diff_rows, "header.sender_id", src_model.get("sender_id",""), prc_model.get("sender_id",""), "MEDIUM")
-for k, rid, sev_day, sev_fmt in [
-    ("TD_raw","header.TD", "LOW", "HIGH"),
-    ("FRD_raw","header.FRD", "LOW", "HIGH"),
-    ("LRD_raw","header.LRD", "LOW", "HIGH"),
-]:
-    s_raw, p_raw = src_model.get(k,""), prc_model.get(k,"")
-    if differ(s_raw, p_raw):
-        sev = sev_day if same_day(s_raw, p_raw) else sev_fmt
-        add_diff_row(diff_rows, rid, format_date(s_raw), format_date(p_raw), sev)
+# ---------------- SECTION: Patient Details ----------------
+st.subheader("Patient Details")
+pat_df = make_patient_table(src.get("Patient",{}), prc.get("Patient",{}))
+st.table(pat_df)
 
-# Patient diffs
-for fld, sev in [
-    ("gender","MEDIUM"), ("age","MEDIUM"), ("age_group","LOW"),
-    ("height","LOW"), ("weight","LOW"), ("initials","LOW")
-]:
-    add_diff_row(diff_rows, f"patient.{fld}", src_model["patient"].get(fld,""), prc_model["patient"].get(fld,""), sev)
+# ---------------- SECTION: Drug Details (matched by drug name) ----------------
+st.subheader("Drug Details (suspects) — matched by drug name")
+src_prods = src.get("Products", [])
+prc_prods = prc.get("Products", [])
+src_idx = dict_by_key(src_prods)
+prc_idx = dict_by_key(prc_prods)
+all_keys = sorted(set(src_idx) | set(prc_idx))
 
-# Product diffs (row-by-row alignment by index, since we are not case-ID matching; show counts)
-max_prod = max(len(src_model["products"]), len(prc_model["products"]))
-for i in range(max_prod):
-    srec = src_model["products"][i] if i < len(src_model["products"]) else {}
-    prec = prc_model["products"][i] if i < len(prc_model["products"]) else {}
-    for fld, sev, fmt in [
-        ("name","LOW", None),
-        ("dose_text","LOW", None),
-        ("dose_value","MEDIUM", None),
-        ("dose_unit","LOW", None),
-        ("start_raw","HIGH", "date"),
-        ("end_raw","MEDIUM", "date"),
-        ("form","LOW", None),
-        ("lot","LOW", None),
-        ("mah","HIGH", None),
-    ]:
-        sv = srec.get(fld,"")
-        pv = prec.get(fld,"")
-        if fmt == "date":
-            # compare display dates (day equivalence lowers severity)
-            sev_eff = "LOW" if parse_date_obj(sv) == parse_date_obj(pv) else sev
-            add_diff_row(diff_rows, f"products[{i+1}].{fld.replace('_raw','')}", format_date(sv), format_date(pv), sev_eff)
-        else:
-            add_diff_row(diff_rows, f"products[{i+1}].{fld}", sv, pv, sev)
+if not all_keys:
+    st.markdown('<div class="box smallnote">No suspect products found in either file.</div>', unsafe_allow_html=True)
+else:
+    for key in all_keys:
+        srec = src_idx.get(key, {"Drug": ""})
+        prec = prc_idx.get(key, {"Drug": ""})
+        title = srec.get("Drug") or prec.get("Drug") or "(Unnamed drug)"
+        make_product_box(srec, prec, title)
 
-# Event diffs (row-by-row alignment by index)
-max_evt = max(len(src_model["events"]), len(prc_model["events"]))
-for i in range(max_evt):
-    se = src_model["events"][i] if i < len(src_model["events"]) else {}
-    pe = prc_model["events"][i] if i < len(prc_model["events"]) else {}
-    # Basic fields
-    for fld, sev in [
-        ("llt_code","MEDIUM"),
-        ("llt_term","LOW"),
-        ("seriousness","HIGH"),
-        ("outcome","MEDIUM")
-    ]:
-        add_diff_row(diff_rows, f"events[{i+1}].{fld}", se.get(fld,""), pe.get(fld,""), sev)
-    # Dates
-    for fld, rid, sev in [("start_raw","start","HIGH"), ("end_raw","end","MEDIUM")]:
-        sv, pv = se.get(fld,""), pe.get(fld,"")
-        sev_eff = "LOW" if parse_date_obj(sv) == parse_date_obj(pv) else sev
-        add_diff_row(diff_rows, f"events[{i+1}].{rid}", format_date(sv), format_date(pv), sev_eff)
+# ---------------- SECTION: Event Details (matched by LLT Code then term) ----------------
+st.subheader("Event Details — matched by LLT code (fallback: normalized term)")
+src_evts = src.get("Events", [])
+prc_evts = prc.get("Events", [])
+# build indexes by key
+def idx_events(lst: List[Dict[str,Any]]) -> Dict[str,Dict[str,Any]]:
+    return {e.get("_key",""): e for e in lst if e.get("_key","")}
+src_evt_idx = idx_events(src_evts)
+prc_evt_idx = idx_events(prc_evts)
+all_evt_keys = sorted(set(src_evt_idx) | set(prc_evt_idx))
 
-# ---------------- Side-by-side vertical rendering ----------------
-st.markdown("### 👀 Side‑by‑side vertical triage view (left = Source, right = Processed)")
-L, R = st.columns(2)
+if not all_evt_keys:
+    st.markdown('<div class="box smallnote">No events found in either file.</div>', unsafe_allow_html=True)
+else:
+    for key in all_evt_keys:
+        se = src_evt_idx.get(key, {"LLT Term": ""})
+        pe = prc_evt_idx.get(key, {"LLT Term": ""})
+        title = se.get("LLT Term") or pe.get("LLT Term") or (se.get("LLT Code") or pe.get("LLT Code") or "(Unnamed event)")
+        make_event_box(se, pe, title)
 
-def section_header(col, title: str):
-    col.markdown(f"#### {title}")
+# ---------------- SECTION: Narrative (optional) ----------------
+st.subheader("Narrative")
+show_full = st.checkbox("Show full narrative (may be long)", value=True)
+max_len = None if show_full else 1000
+src_narr = src.get("Narrative","")[:max_len] if max_len else src.get("Narrative","")
+prc_narr = prc.get("Narrative","")[:max_len] if max_len else prc.get("Narrative","")
 
-def show_kv(col, label: str, left_v: str, right_v: str, right_side: bool = False):
-    """Render a key/value with mismatch hint. When right_side=True, compare right vs left to mark on the right."""
-    if right_side:
-        icon = mismatch_icon(left_v, right_v)
-        col.markdown(f"**{label}:** {safe_display(right_v)}{icon}")
-    else:
-        icon = ""  # only annotate right column
-        col.markdown(f"**{label}:** {safe_display(left_v)}")
+st.markdown('<div class="box"><h5>Source</h5>', unsafe_allow_html=True)
+st.code(src_narr or "—")
+st.markdown('</div>', unsafe_allow_html=True)
 
-# Header
-section_header(L, "Header"); section_header(R, "Header")
-show_kv(L, "Sender ID", src_model["sender_id"], prc_model["sender_id"])
-show_kv(R, "Sender ID", src_model["sender_id"], prc_model["sender_id"], right_side=True)
+st.markdown('<div class="box"><h5>Processed</h5>', unsafe_allow_html=True)
+# annotate mismatch if texts differ (truncated text may affect comparison, but this is fine for display)
+suffix = " 🔴" if (src.get("Narrative","") != prc.get("Narrative","")) else ""
+st.code((prc_narr or "—") + suffix)
+st.markdown('</div>', unsafe_allow_html=True)
 
-for lab, raw_key in [("TD", "TD_raw"), ("FRD", "FRD_raw"), ("LRD", "LRD_raw")]:
-    s_disp, p_disp = format_date(src_model.get(raw_key,"")), format_date(prc_model.get(raw_key,""))
-    show_kv(L, lab, s_disp, p_disp)
-    show_kv(R, lab, s_disp, p_disp, right_side=True)
-
-# Patient
-section_header(L, "Patient"); section_header(R, "Patient")
-for fld, lab in [
-    ("gender","Gender"), ("age","Age"), ("age_group","Age Group"),
-    ("height","Height"), ("weight","Weight"), ("initials","Initials")
-]:
-    s_v = src_model["patient"].get(fld,"")
-    p_v = prc_model["patient"].get(fld,"")
-    show_kv(L, lab, s_v, p_v)
-    show_kv(R, lab, s_v, p_v, right_side=True)
-
-# Products
-section_header(L, "Products (suspects)"); section_header(R, "Products (suspects)")
-max_prod_rows = max(len(src_model["products"]), len(prc_model["products"]))
-if max_prod_rows == 0:
-    L.write("_No suspect products found_"); R.write("_No suspect products found_")
-for i in range(max_prod_rows):
-    srec = src_model["products"][i] if i < len(src_model["products"]) else {}
-    prec = prc_model["products"][i] if i < len(prc_model["products"]) else {}
-    L.markdown(f"**{i+1})**")
-    R.markdown(f"**{i+1})**")
-    for fld, lab, fmt in [
-        ("name","Drug","text"),
-        ("dose_text","Dosage","text"),
-        ("dose_value","Dose Value","text"),
-        ("dose_unit","Dose Unit","text"),
-        ("start_raw","Start Date","date"),
-        ("end_raw","Stop Date","date"),
-        ("form","Formulation","text"),
-        ("lot","Lot No","text"),
-        ("mah","MAH","text"),
-    ]:
-        sv = srec.get(fld,"")
-        pv = prec.get(fld,"")
-        s_disp = format_date(sv) if fmt == "date" else sv
-        p_disp = format_date(pv) if fmt == "date" else pv
-        show_kv(L, lab, s_disp, p_disp)
-        show_kv(R, lab, s_disp, p_disp, right_side=True)
-
-# Events
-section_header(L, "Events"); section_header(R, "Events")
-max_evt_rows = max(len(src_model["events"]), len(prc_model["events"]))
-if max_evt_rows == 0:
-    L.write("_No events found_"); R.write("_No events found_")
-for i in range(max_evt_rows):
-    se = src_model["events"][i] if i < len(src_model["events"]) else {}
-    pe = prc_model["events"][i] if i < len(prc_model["events"]) else {}
-    L.markdown(f"**Event {i+1}**")
-    R.markdown(f"**Event {i+1}**")
-    for fld, lab, fmt in [
-        ("llt_code","LLT Code","text"),
-        ("llt_term","LLT Term","text"),
-        ("seriousness","Seriousness","text"),
-        ("outcome","Outcome","text"),
-        ("start_raw","Event Start","date"),
-        ("end_raw","Event End","date"),
-    ]:
-        sv = se.get(fld,"")
-        pv = pe.get(fld,"")
-        s_disp = format_date(sv) if fmt == "date" else sv
-        p_disp = format_date(pv) if fmt == "date" else pv
-        show_kv(L, lab, s_disp, p_disp)
-        show_kv(R, lab, s_disp, p_disp, right_side=True)
-
-# Narrative (toggle full view)
-section_header(L, "Narrative"); section_header(R, "Narrative")
-show_full_narrative = st.checkbox("Show full narrative (may be long)", value=True)
-max_len = None if show_full_narrative else 1000
-src_narr = src_model.get("narrative","")[:max_len] if max_len else src_model.get("narrative","")
-prc_narr = prc_model.get("narrative","")[:max_len] if max_len else prc_model.get("narrative","")
-
-L.code(src_narr or "—")
-R.code(prc_narr or "—" + (" 🔴" if differ(src_narr, prc_narr) else ""))
-
-# ---------------- Excel export ----------------
+# ---------------- Export (optional) ----------------
 st.markdown("---")
-st.markdown("### ⬇️ Download QC Results (Excel)")
+st.markdown("### ⬇️ Download Comparison (Excel)")
+# Build flat sheets
+def rows_from_table(df: pd.DataFrame, section: str) -> List[Dict[str,str]]:
+    out = []
+    for _, r in df.iterrows():
+        out.append({"Section": section, "Field": r["Field"], "Source": r["Source"], "Processed": r["Processed"]})
+    return out
 
-# Side-by-side flatten for export
-side_rows = []
+admin_rows = rows_from_table(admin_df, "Admin/Header")
+pat_rows = rows_from_table(pat_df, "Patient")
 
-def side_add(path: str, s_val: str, p_val: str):
-    side_rows.append({"field_path": path, "source": s_val, "processed": p_val})
+prod_rows = []
+for key in all_keys:
+    srec = src_idx.get(key, {})
+    prec = prc_idx.get(key, {})
+    title = srec.get("Drug") or prec.get("Drug") or "(Unnamed drug)"
+    for field in ["Dosage Text","Dose Value","Dose Unit","Start Date","Stop Date","Formulation","Lot No","MAH"]:
+        s_val = srec.get(field, "") or (format_date(srec.get(field + " (raw)","")) if "Date" in field else "")
+        p_val = prec.get(field, "") or (format_date(prec.get(field + " (raw)","")) if "Date" in field else "")
+        prod_rows.append({"Section":"Drug", "Group": title, "Field": field, "Source": s_val or "—", "Processed": p_val or "—"})
 
-# Header
-side_add("header.sender_id", src_model["sender_id"], prc_model["sender_id"])
-for lab, raw_key in [("TD","TD_raw"), ("FRD","FRD_raw"), ("LRD","LRD_raw")]:
-    side_add(f"header.{lab}", format_date(src_model.get(raw_key,"")), format_date(prc_model.get(raw_key,"")))
-
-# Patient
-for fld in ["gender","age","age_group","height","weight","initials"]:
-    side_add(f"patient.{fld}", src_model["patient"].get(fld,""), prc_model["patient"].get(fld,""))
-
-# Products
-for i in range(max_prod_rows):
-    srec = src_model["products"][i] if i < len(src_model["products"]) else {}
-    prec = prc_model["products"][i] if i < len(prc_model["products"]) else {}
-    for fld, lab, fmt in [
-        ("name","Drug","text"), ("dose_text","Dosage","text"),
-        ("dose_value","Dose Value","text"), ("dose_unit","Dose Unit","text"),
-        ("start_raw","Start Date","date"), ("end_raw","Stop Date","date"),
-        ("form","Formulation","text"), ("lot","Lot No","text"), ("mah","MAH","text"),
-    ]:
-        s_disp = format_date(srec.get(fld,"")) if fmt == "date" else srec.get(fld,"")
-        p_disp = format_date(prec.get(fld,"")) if fmt == "date" else prec.get(fld,"")
-        side_add(f"products[{i+1}].{lab}", s_disp, p_disp)
-
-# Events
-for i in range(max_evt_rows):
-    se = src_model["events"][i] if i < len(src_model["events"]) else {}
-    pe = prc_model["events"][i] if i < len(prc_model["events"]) else {}
-    for fld, lab, fmt in [
-        ("llt_code","LLT Code","text"), ("llt_term","LLT Term","text"),
-        ("seriousness","Seriousness","text"), ("outcome","Outcome","text"),
-        ("start_raw","Event Start","date"), ("end_raw","Event End","date"),
-    ]:
-        s_disp = format_date(se.get(fld,"")) if fmt == "date" else se.get(fld,"")
-        p_disp = format_date(pe.get(fld,"")) if fmt == "date" else pe.get(fld,"")
-        side_add(f"events[{i+1}].{lab}", s_disp, p_disp)
-
-# Extract overview for audit
-def flat_extract(model: Dict[str,Any], role: str):
-    base = {
-        "role": role,
-        "sender_id": model.get("sender_id",""),
-        "TD": format_date(model.get("TD_raw","")),
-        "FRD": format_date(model.get("FRD_raw","")),
-        "LRD": format_date(model.get("LRD_raw","")),
-        "pat_gender": model["patient"].get("gender",""),
-        "pat_age": model["patient"].get("age",""),
-        "pat_age_group": model["patient"].get("age_group",""),
-        "pat_height": model["patient"].get("height",""),
-        "pat_weight": model["patient"].get("weight",""),
-        "pat_initials": model["patient"].get("initials",""),
-    }
-    return base
+evt_rows = []
+for key in all_evt_keys:
+    se = src_evt_idx.get(key, {})
+    pe = prc_evt_idx.get(key, {})
+    title = se.get("LLT Term") or pe.get("LLT Term") or (se.get("LLT Code") or pe.get("LLT Code") or "(Unnamed event)")
+    for field in ["LLT Code","LLT Term","Seriousness","Outcome","Event Start","Event End"]:
+        s_val = se.get(field, "") or (format_date(se.get(field + " (raw)","")) if "Event" in field else "")
+        p_val = pe.get(field, "") or (format_date(pe.get(field + " (raw)","")) if "Event" in field else "")
+        evt_rows.append({"Section":"Event", "Group": title, "Field": field, "Source": s_val or "—", "Processed": p_val or "—"})
 
 excel_buffer = io.BytesIO()
 with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-    pd.DataFrame(side_rows).to_excel(writer, index=False, sheet_name="SideBySide")
-    if diff_rows:
-        pd.DataFrame(diff_rows).to_excel(writer, index=False, sheet_name="Diffs")
-    pd.DataFrame([flat_extract(src_model, "source")]).to_excel(writer, index=False, sheet_name="Extract_Source")
-    pd.DataFrame([flat_extract(prc_model, "processed")]).to_excel(writer, index=False, sheet_name="Extract_Processed")
+    pd.DataFrame(admin_rows + pat_rows).to_excel(writer, index=False, sheet_name="Admin_Patient")
+    if prod_rows:
+        pd.DataFrame(prod_rows).to_excel(writer, index=False, sheet_name="Drugs")
+    if evt_rows:
+        pd.DataFrame(evt_rows).to_excel(writer, index=False, sheet_name="Events")
+    pd.DataFrame([{"Source Narrative": src.get("Narrative",""),
+                   "Processed Narrative": prc.get("Narrative","")}]).to_excel(writer, index=False, sheet_name="Narrative")
 
-st.download_button("Download qc_twofile_compare.xlsx", excel_buffer.getvalue(), "qc_twofile_compare.xlsx")
+st.download_button("Download qc_twofile_compare_tabular.xlsx", excel_buffer.getvalue(), "qc_twofile_compare_tabular.xlsx")
